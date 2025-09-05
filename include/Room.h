@@ -6,7 +6,7 @@
 
 class Room {
 public:
-    Room(float width = 20.0f, float height = 10.0f, float depth = 20.0f);
+    Room(float width = 60.0f, float height = 25.0f, float depth = 60.0f);
     ~Room();
     
     bool Initialize();
