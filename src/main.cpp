@@ -742,6 +742,187 @@ void drawParticles() {
     glEnable(GL_TEXTURE_2D);
 }
 
+// 绘制局部坐标系下的长方体（底面中心在原点，光照法线正确）
+void drawBoxLocal(float w, float h, float d, float r, float g, float b) {
+    glColor3f(r, g, b);
+    float hw = w * 0.5f, hd = d * 0.5f;
+    glBegin(GL_QUADS);
+    // 顶面 (+Y)
+    glNormal3f(0, 1, 0);
+    glVertex3f(-hw, h, -hd); glVertex3f(-hw, h,  hd);
+    glVertex3f( hw, h,  hd); glVertex3f( hw, h, -hd);
+    // 底面 (-Y)
+    glNormal3f(0, -1, 0);
+    glVertex3f(-hw, 0, -hd); glVertex3f( hw, 0, -hd);
+    glVertex3f( hw, 0,  hd); glVertex3f(-hw, 0,  hd);
+    // 前面 (+Z)
+    glNormal3f(0, 0, 1);
+    glVertex3f(-hw, 0,  hd); glVertex3f( hw, 0,  hd);
+    glVertex3f( hw, h,  hd); glVertex3f(-hw, h,  hd);
+    // 后面 (-Z)
+    glNormal3f(0, 0, -1);
+    glVertex3f( hw, 0, -hd); glVertex3f(-hw, 0, -hd);
+    glVertex3f(-hw, h, -hd); glVertex3f( hw, h, -hd);
+    // 左面 (-X)
+    glNormal3f(-1, 0, 0);
+    glVertex3f(-hw, 0,  hd); glVertex3f(-hw, 0, -hd);
+    glVertex3f(-hw, h, -hd); glVertex3f(-hw, h,  hd);
+    // 右面 (+X)
+    glNormal3f(1, 0, 0);
+    glVertex3f( hw, 0, -hd); glVertex3f( hw, 0,  hd);
+    glVertex3f( hw, h,  hd); glVertex3f( hw, h, -hd);
+    glEnd();
+}
+
+// 绘制桌子（局部原点在底面中心）
+void drawTable() {
+    const float woodR = 0.55f, woodG = 0.27f, woodB = 0.07f;
+    const float legR  = 0.38f, legG  = 0.19f, legB  = 0.05f;
+    const float W = 6.0f, D = 4.0f, legH = 3.2f, topT = 0.22f, legS = 0.3f;
+    const float offX = W * 0.5f - 0.4f, offZ = D * 0.5f - 0.4f;
+
+    // 桌面
+    glPushMatrix(); glTranslatef(0, legH, 0);
+    drawBoxLocal(W, topT, D, woodR, woodG, woodB);
+    glPopMatrix();
+
+    // 四条腿
+    const float sx[4] = {-offX,  offX, -offX,  offX};
+    const float sz[4] = {-offZ, -offZ,  offZ,  offZ};
+    for (int i = 0; i < 4; i++) {
+        glPushMatrix(); glTranslatef(sx[i], 0, sz[i]);
+        drawBoxLocal(legS, legH, legS, legR, legG, legB);
+        glPopMatrix();
+    }
+}
+
+// 绘制椅子（局部原点在底面中心，椅背朝 -Z 方向，人坐时面朝 +Z）
+void drawChair() {
+    const float woodR = 0.45f, woodG = 0.22f, woodB = 0.05f;
+    const float legR  = 0.32f, legG  = 0.16f, legB  = 0.04f;
+    const float SW = 1.8f, SD = 1.8f, seatH = 2.2f, seatT = 0.15f;
+    const float legS = 0.2f, backH = 2.0f;
+    const float offX = SW * 0.5f - 0.25f, offZ = SD * 0.5f - 0.25f;
+
+    // 座面
+    glPushMatrix(); glTranslatef(0, seatH - seatT, 0);
+    drawBoxLocal(SW, seatT, SD, woodR, woodG, woodB);
+    glPopMatrix();
+
+    // 四条腿
+    const float lsx[4] = {-offX,  offX, -offX,  offX};
+    const float lsz[4] = {-offZ, -offZ,  offZ,  offZ};
+    for (int i = 0; i < 4; i++) {
+        glPushMatrix(); glTranslatef(lsx[i], 0, lsz[i]);
+        drawBoxLocal(legS, seatH - seatT, legS, legR, legG, legB);
+        glPopMatrix();
+    }
+
+    // 椅背竖杆（-Z 侧）
+    glPushMatrix(); glTranslatef(-offX, seatH, -offZ);
+    drawBoxLocal(legS, backH, legS, legR, legG, legB);
+    glPopMatrix();
+    glPushMatrix(); glTranslatef( offX, seatH, -offZ);
+    drawBoxLocal(legS, backH, legS, legR, legG, legB);
+    glPopMatrix();
+
+    // 椅背横档（上下各一）
+    glPushMatrix(); glTranslatef(0, seatH + backH * 0.7f, -offZ);
+    drawBoxLocal(SW - legS, 0.12f, legS, woodR, woodG, woodB);
+    glPopMatrix();
+    glPushMatrix(); glTranslatef(0, seatH + backH * 0.3f, -offZ);
+    drawBoxLocal(SW - legS, 0.12f, legS, woodR, woodG, woodB);
+    glPopMatrix();
+}
+
+// 绘制房间家具（桌子 + 四把椅子）
+void drawFurniture() {
+    glDisable(GL_TEXTURE_2D);
+
+    // 桌子放在房间后方区域
+    glPushMatrix();
+    glTranslatef(0, 0, 15);
+    drawTable();
+    glPopMatrix();
+
+    // 前侧椅子（面朝桌子，旋转180°）
+    glPushMatrix();
+    glTranslatef(0, 0, 20.0f);
+    glRotatef(180, 0, 1, 0);
+    drawChair();
+    glPopMatrix();
+
+    // 后侧椅子（面朝桌子，不旋转）
+    glPushMatrix();
+    glTranslatef(0, 0, 10.0f);
+    drawChair();
+    glPopMatrix();
+
+    // 左侧椅子（面朝桌子，旋转-90°）
+    glPushMatrix();
+    glTranslatef(-5.5f, 0, 15);
+    glRotatef(-90, 0, 1, 0);
+    drawChair();
+    glPopMatrix();
+
+    // 右侧椅子（面朝桌子，旋转90°）
+    glPushMatrix();
+    glTranslatef(5.5f, 0, 15);
+    glRotatef(90, 0, 1, 0);
+    drawChair();
+    glPopMatrix();
+
+    glEnable(GL_TEXTURE_2D);
+}
+
+// 绘制HUD准星（2D屏幕覆盖层）
+void drawHUD() {
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, 1024, 0, 768, -1, 1);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    const float cx = 512.0f, cy = 384.0f;
+    const float arm = 10.0f, gap = 4.0f;
+
+    glLineWidth(1.5f);
+    glColor4f(0.0f, 1.0f, 0.0f, 0.85f);
+    glBegin(GL_LINES);
+    // 水平
+    glVertex2f(cx - arm - gap, cy); glVertex2f(cx - gap, cy);
+    glVertex2f(cx + gap, cy);       glVertex2f(cx + arm + gap, cy);
+    // 垂直
+    glVertex2f(cx, cy - arm - gap); glVertex2f(cx, cy - gap);
+    glVertex2f(cx, cy + gap);       glVertex2f(cx, cy + arm + gap);
+    glEnd();
+
+    // 中心点
+    glPointSize(2.0f);
+    glBegin(GL_POINTS);
+    glVertex2f(cx, cy);
+    glEnd();
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_TEXTURE_2D);
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
+
 // 设置光照
 void setupLighting() {
     // 启用光照
@@ -975,11 +1156,13 @@ int main() {
         
         setupCamera();
         drawRoom();
+        drawFurniture(); // 绘制家具
         drawWindow(); // 绘制窗户
         drawLogo(); // 绘制logo装饰画
         drawDaqing(); // 绘制daqing装饰画
         drawHome(); // 绘制home装饰画
         drawParticles(); // 绘制火焰粒子
+        drawHUD(); // 绘制准星
         
         glfwSwapBuffers(window);
         glfwPollEvents();
