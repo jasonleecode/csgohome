@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenGL REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 
 # 查找PNG库
 pkg_check_modules(PNG REQUIRED libpng)
@@ -23,9 +24,11 @@ add_executable(CSGODemo src/main.cpp)
 target_link_libraries(CSGODemo 
     OpenGL::GL 
     GLU
-    glfw 
+    glfw
     ${PNG_LIBRARIES}
     m
+    ${CMAKE_DL_LIBS}
+    Threads::Threads
 )
 
 # 设置编译选项
