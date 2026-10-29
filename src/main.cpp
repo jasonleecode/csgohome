@@ -1,4 +1,6 @@
 #include <GLFW/glfw3.h>
+#include "HouseScene.h"
+#include <algorithm>
 #include <GL/gl.h>
 #include <GL/glu.h>
 #include <iostream>
@@ -223,9 +225,15 @@ static void shutdown() {
 
 } // namespace audio
 
-// 房间大小常量 - 在这里修改房间尺寸
-const float ROOM_SIZE = 60.0f;  // 房间的宽度和长度 (从-30到+30)
-const float ROOM_HEIGHT = 25.0f; // 房间的高度 (从0到25)
+HouseScene house;
+bool shadowsEnabled = true;
+bool vsyncEnabled = true;
+float measuredFps = 0, measuredMs = 0;
+int framebufferWidth = 1280, framebufferHeight = 800;
+
+// 与实体场景保持一致，供挂画、靶子等旧系统使用。
+const float ROOM_SIZE = HouseScene::halfSize * 2;
+const float ROOM_HEIGHT = HouseScene::height;
 const float ROOM_HALF = ROOM_SIZE / 2.0f; // 房间的一半大小
 
 // 纹理加载函数
@@ -318,7 +326,7 @@ public:
     float yaw, pitch;
     float radius; // 碰撞检测半径
     
-    SimpleCamera() : x(0), y(3), z(0), yaw(-90), pitch(0), radius(0.5f) {}
+    SimpleCamera() : x(0), y(4), z(23), yaw(-90), pitch(0), radius(0.5f) {}
     
     void update() {
         // 更新相机位置
@@ -332,40 +340,17 @@ public:
     
     // 检查是否与墙壁碰撞
     bool checkCollision(float newX, float newY, float newZ) {
-        // 检查X轴边界（左右墙壁）
-        if (newX - radius < -ROOM_HALF || newX + radius > ROOM_HALF) {
-            return true;
-        }
-        
-        // 检查Y轴边界（地面和天花板）
-        if (newY - radius < 0.5f || newY + radius > ROOM_HEIGHT - 0.5f) {
-            return true;
-        }
-        
-        // 检查Z轴边界（前后墙壁）
-        if (newZ - radius < -ROOM_HALF || newZ + radius > ROOM_HALF) {
-            return true;
-        }
-        
-        return false;
+        return house.collides(newX, newY, newZ, radius);
     }
     
     void move(float dx, float dy, float dz) {
-        float newX = x + dx;
-        float newY = y + dy;
-        float newZ = z + dz;
-        
-        // 分别检查每个轴的移动，只阻止碰撞的轴
-        if (!checkCollision(newX, y, z)) {
-            x = newX;
-        }
-        
-        if (!checkCollision(x, newY, z)) {
-            y = newY;
-        }
-        
-        if (!checkCollision(x, y, newZ)) {
-            z = newZ;
+        // Substeps prevent crossing thin walls during a slow frame.
+        int steps = std::max(1, static_cast<int>(std::ceil(std::max({fabsf(dx), fabsf(dy), fabsf(dz)}) / 0.2f)));
+        dx /= steps; dy /= steps; dz /= steps;
+        for (int i = 0; i < steps; ++i) {
+            if (!checkCollision(x + dx, y, z)) x += dx;
+            if (!checkCollision(x, y + dy, z)) y += dy;
+            if (!checkCollision(x, y, z + dz)) z += dz;
         }
     }
 };
@@ -376,20 +361,9 @@ bool keys[1024] = {false};
 double lastX = 400, lastY = 300;
 bool firstMouse = true;
 bool mouseCaptured = true; // 鼠标是否被捕获
-GLuint wallTexture = 0;
-GLuint floorTexture = 0;
-GLuint skyTexture = 0;
 GLuint logoTexture = 0;
 GLuint daqingTexture = 0;
 GLuint homeTexture = 0;
-
-// 窗户相关变量
-float windowWidth = 8.0f;  // 窗户宽度
-float windowHeight = 6.0f; // 窗户高度
-float windowX = -8.0f;     // 窗户X位置（往左移动8单位）
-float windowY = 8.0f;      // 窗户Y位置（离地面8单位）
-float windowZ = -ROOM_HALF - 0.01f; // 窗户Z位置（在前墙上）
-float wallThickness = 2.0f; // 墙壁厚度
 
 // 火焰粒子系统
 struct Particle {
@@ -408,12 +382,6 @@ float fireY = 1.0f;       // 火焰Y位置（地面附近）
 float fireZ = 0.0f;       // 火焰Z位置
 
 // 光照变量
-float lightIntensity = 6.0f; // 光源亮度 (0.0 - 10.0)
-float lightPosition[4] = {0.0f, 12.0f, 0.0f, 1.0f}; // 光源位置 (点光源)
-float lightAmbient[4] = {0.8f, 0.8f, 0.8f, 1.0f}; // 环境光
-float lightDiffuse[4] = {6.0f, 6.0f, 6.0f, 1.0f}; // 漫反射光
-float lightSpecular[4] = {6.0f, 6.0f, 6.0f, 1.0f}; // 镜面反射光
-
 // ============================================================================
 // 武器系统状态
 // ============================================================================
@@ -492,8 +460,10 @@ void randomTargetPos(float& x, float& z) {
         z = (rand()%100/100.0f) * (ROOM_SIZE - 8.0f) - (ROOM_HALF - 4.0f);
         if (fabs(x) < 3.0f && fabs(z) < 3.0f) continue;        // 避开火焰
         if (fabs(x) < 8.0f && z > 8.0f && z < 22.0f) continue; // 避开桌椅区
+        if (house.collides(x, 2.0f, z, 1.0f)) continue;
         return;
     }
+    x = 15; z = -10;
 }
 
 void initTargets() {
@@ -536,9 +506,9 @@ bool rayAABB(float ox, float oy, float oz, float dx, float dy, float dz,
 // 场景交互：灯开关
 // ============================================================================
 bool  lightsOn = true;            // 房间主光是否开启
-float switchX = ROOM_HALF - 0.05f; // 开关在右墙
+float switchX = ROOM_HALF - 0.65f; // 开关在右墙
 float switchY = 4.0f;
-float switchZ = 18.0f;            // 靠近门/桌区
+float switchZ = 1.0f;            // 靠近门/桌区
 const float switchSize = 0.8f;
 bool  switchPrompt = false;       // 本帧是否显示交互提示
 
@@ -552,6 +522,7 @@ void drawText(const std::string& s, float x, float y, float scale,
 
 // 键盘回调
 void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (key < 0 || key >= 1024) return;
     if (action == GLFW_PRESS) {
         keys[key] = true;
     } else if (action == GLFW_RELEASE) {
@@ -573,6 +544,17 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
     if (key == GLFW_KEY_Q && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, GLFW_TRUE);
     }
+
+    if (action == GLFW_PRESS && key == GLFW_KEY_F5) {
+        bool inside = fabsf(camera.x) < 31 && fabsf(camera.z) < 31;
+        camera.x = inside ? 65 : 0; camera.y = inside ? 32 : 4; camera.z = inside ? 74 : 23;
+        camera.yaw = inside ? -132 : -90; camera.pitch = inside ? -18 : 0;
+    }
+    if (action == GLFW_PRESS && key == GLFW_KEY_F6) {
+        vsyncEnabled = !vsyncEnabled; glfwSwapInterval(vsyncEnabled ? 1 : 0);
+    }
+    if (action == GLFW_PRESS && key == GLFW_KEY_F7) shadowsEnabled = !shadowsEnabled;
+    if (action == GLFW_PRESS && key == GLFW_KEY_L) toggleLights();
 
     // R键：上膛
     if (key == GLFW_KEY_R && action == GLFW_PRESS) {
@@ -629,179 +611,6 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
     }
 }
 
-// 绘制带纹理的房间
-void drawRoom() {
-    // 启用纹理
-    glEnable(GL_TEXTURE_2D);
-    
-    // 地面 - 使用floor纹理，增加重复次数
-    glBindTexture(GL_TEXTURE_2D, floorTexture);
-    glColor3f(1.0f, 1.0f, 1.0f);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-ROOM_HALF, 0, -ROOM_HALF);
-    glTexCoord2f(8.0f, 0.0f); glVertex3f(ROOM_HALF, 0, -ROOM_HALF);
-    glTexCoord2f(8.0f, 8.0f); glVertex3f(ROOM_HALF, 0, ROOM_HALF);
-    glTexCoord2f(0.0f, 8.0f); glVertex3f(-ROOM_HALF, 0, ROOM_HALF);
-    glEnd();
-    
-    // 天花板 - 使用sky纹理，增加重复次数
-    glBindTexture(GL_TEXTURE_2D, skyTexture);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-ROOM_HALF, ROOM_HEIGHT, -ROOM_HALF);
-    glTexCoord2f(8.0f, 0.0f); glVertex3f(ROOM_HALF, ROOM_HEIGHT, -ROOM_HALF);
-    glTexCoord2f(8.0f, 8.0f); glVertex3f(ROOM_HALF, ROOM_HEIGHT, ROOM_HALF);
-    glTexCoord2f(0.0f, 8.0f); glVertex3f(-ROOM_HALF, ROOM_HEIGHT, ROOM_HALF);
-    glEnd();
-    
-    // 前墙 - 有厚度的墙，带窗户洞
-    glBindTexture(GL_TEXTURE_2D, wallTexture);
-    
-    // 内墙（房间内部看到的面）
-    float innerZ = -ROOM_HALF;
-    float outerZ = -ROOM_HALF - wallThickness;
-    
-    // 内墙上半部分（窗户上方）
-    float topTexBottom = (windowY + windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    float topTexTop = 6.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, topTexBottom); glVertex3f(-ROOM_HALF, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(8.0f, topTexBottom); glVertex3f(ROOM_HALF, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(8.0f, topTexTop); glVertex3f(ROOM_HALF, ROOM_HEIGHT, innerZ);
-    glTexCoord2f(0.0f, topTexTop); glVertex3f(-ROOM_HALF, ROOM_HEIGHT, innerZ);
-    glEnd();
-    
-    // 内墙下半部分（窗户下方）
-    float bottomTexTop = (windowY - windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    float bottomTexBottom = 0.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, bottomTexBottom); glVertex3f(-ROOM_HALF, 0, innerZ);
-    glTexCoord2f(8.0f, bottomTexBottom); glVertex3f(ROOM_HALF, 0, innerZ);
-    glTexCoord2f(8.0f, bottomTexTop); glVertex3f(ROOM_HALF, windowY - windowHeight/2, innerZ);
-    glTexCoord2f(0.0f, bottomTexTop); glVertex3f(-ROOM_HALF, windowY - windowHeight/2, innerZ);
-    glEnd();
-    
-    // 内墙左侧部分（窗户左侧）
-    float leftTexStart = 0.0f;
-    float leftTexEnd = (windowX - windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float leftTexHeight = windowHeight / ROOM_HEIGHT * 6.0f;
-    float leftTexBottom = (windowY - windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(leftTexStart, leftTexBottom); glVertex3f(-ROOM_HALF, windowY - windowHeight/2, innerZ);
-    glTexCoord2f(leftTexEnd, leftTexBottom); glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, innerZ);
-    glTexCoord2f(leftTexEnd, leftTexBottom + leftTexHeight); glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(leftTexStart, leftTexBottom + leftTexHeight); glVertex3f(-ROOM_HALF, windowY + windowHeight/2, innerZ);
-    glEnd();
-    
-    // 内墙右侧部分（窗户右侧）
-    float rightTexStart = (windowX + windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float rightTexEnd = 8.0f;
-    float rightTexHeight = windowHeight / ROOM_HEIGHT * 6.0f;
-    float rightTexBottom = (windowY - windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(rightTexStart, rightTexBottom); glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, innerZ);
-    glTexCoord2f(rightTexEnd, rightTexBottom); glVertex3f(ROOM_HALF, windowY - windowHeight/2, innerZ);
-    glTexCoord2f(rightTexEnd, rightTexBottom + rightTexHeight); glVertex3f(ROOM_HALF, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(rightTexStart, rightTexBottom + rightTexHeight); glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, innerZ);
-    glEnd();
-    
-    // 注意：窗户的玻璃区域不在这里绘制，它在drawWindow()函数中单独绘制
-    
-    // 外墙（房间外部看到的面）
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-ROOM_HALF, 0, outerZ);
-    glTexCoord2f(8.0f, 0.0f); glVertex3f(ROOM_HALF, 0, outerZ);
-    glTexCoord2f(8.0f, 6.0f); glVertex3f(ROOM_HALF, ROOM_HEIGHT, outerZ);
-    glTexCoord2f(0.0f, 6.0f); glVertex3f(-ROOM_HALF, ROOM_HEIGHT, outerZ);
-    glEnd();
-    
-    // 窗户的侧面（左、右、上、下）- 使用墙壁纹理
-    // 注意：这里绘制的是窗户的侧面（墙壁部分），不是玻璃
-    // 窗户左侧面
-    float leftSideTexStart = (windowX - windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float leftSideTexEnd = leftSideTexStart + (wallThickness / ROOM_SIZE * 8.0f);
-    float leftSideTexHeight = windowHeight / ROOM_HEIGHT * 6.0f;
-    float leftSideTexBottom = (windowY - windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(leftSideTexStart, leftSideTexBottom); glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, innerZ);
-    glTexCoord2f(leftSideTexStart, leftSideTexBottom + leftSideTexHeight); glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(leftSideTexEnd, leftSideTexBottom + leftSideTexHeight); glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, outerZ);
-    glTexCoord2f(leftSideTexEnd, leftSideTexBottom); glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, outerZ);
-    glEnd();
-    
-    // 窗户右侧面
-    float rightSideTexStart = (windowX + windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float rightSideTexEnd = rightSideTexStart + (wallThickness / ROOM_SIZE * 8.0f);
-    float rightSideTexHeight = windowHeight / ROOM_HEIGHT * 6.0f;
-    float rightSideTexBottom = (windowY - windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(rightSideTexStart, rightSideTexBottom); glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, outerZ);
-    glTexCoord2f(rightSideTexStart, rightSideTexBottom + rightSideTexHeight); glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, outerZ);
-    glTexCoord2f(rightSideTexEnd, rightSideTexBottom + rightSideTexHeight); glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(rightSideTexEnd, rightSideTexBottom); glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, innerZ);
-    glEnd();
-    
-    // 窗户上侧面
-    float topSideTexStart = (windowX - windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float topSideTexEnd = (windowX + windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float topSideTexHeight = wallThickness / ROOM_HEIGHT * 6.0f;
-    float topSideTexBottom = (windowY + windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(topSideTexStart, topSideTexBottom); glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(topSideTexEnd, topSideTexBottom); glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, innerZ);
-    glTexCoord2f(topSideTexEnd, topSideTexBottom + topSideTexHeight); glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, outerZ);
-    glTexCoord2f(topSideTexStart, topSideTexBottom + topSideTexHeight); glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, outerZ);
-    glEnd();
-    
-    // 窗户下侧面
-    float bottomSideTexStart = (windowX - windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float bottomSideTexEnd = (windowX + windowWidth/2 - (-ROOM_HALF)) / ROOM_SIZE * 8.0f;
-    float bottomSideTexHeight = wallThickness / ROOM_HEIGHT * 6.0f;
-    float bottomSideTexBottom = (windowY - windowHeight/2) / ROOM_HEIGHT * 6.0f;
-    
-    glBegin(GL_QUADS);
-    glTexCoord2f(bottomSideTexStart, bottomSideTexBottom); glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, outerZ);
-    glTexCoord2f(bottomSideTexEnd, bottomSideTexBottom); glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, outerZ);
-    glTexCoord2f(bottomSideTexEnd, bottomSideTexBottom + bottomSideTexHeight); glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, innerZ);
-    glTexCoord2f(bottomSideTexStart, bottomSideTexBottom + bottomSideTexHeight); glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, innerZ);
-    glEnd();
-    
-    // 后墙 - 使用wall纹理，增加重复次数
-    glBindTexture(GL_TEXTURE_2D, wallTexture);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-ROOM_HALF, 0, ROOM_HALF);
-    glTexCoord2f(8.0f, 0.0f); glVertex3f(ROOM_HALF, 0, ROOM_HALF);
-    glTexCoord2f(8.0f, 6.0f); glVertex3f(ROOM_HALF, ROOM_HEIGHT, ROOM_HALF);
-    glTexCoord2f(0.0f, 6.0f); glVertex3f(-ROOM_HALF, ROOM_HEIGHT, ROOM_HALF);
-    glEnd();
-    
-    // 左墙 - 使用wall纹理，增加重复次数
-    glBindTexture(GL_TEXTURE_2D, wallTexture);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-ROOM_HALF, 0, -ROOM_HALF);
-    glTexCoord2f(8.0f, 0.0f); glVertex3f(-ROOM_HALF, 0, ROOM_HALF);
-    glTexCoord2f(8.0f, 6.0f); glVertex3f(-ROOM_HALF, ROOM_HEIGHT, ROOM_HALF);
-    glTexCoord2f(0.0f, 6.0f); glVertex3f(-ROOM_HALF, ROOM_HEIGHT, -ROOM_HALF);
-    glEnd();
-    
-    // 右墙 - 使用wall纹理，增加重复次数
-    glBindTexture(GL_TEXTURE_2D, wallTexture);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(ROOM_HALF, 0, -ROOM_HALF);
-    glTexCoord2f(8.0f, 0.0f); glVertex3f(ROOM_HALF, 0, ROOM_HALF);
-    glTexCoord2f(8.0f, 6.0f); glVertex3f(ROOM_HALF, ROOM_HEIGHT, ROOM_HALF);
-    glTexCoord2f(0.0f, 6.0f); glVertex3f(ROOM_HALF, ROOM_HEIGHT, -ROOM_HALF);
-    glEnd();
-    
-    glDisable(GL_TEXTURE_2D);
-}
-
 // 绘制logo装饰画
 void drawLogo() {
     // 启用纹理
@@ -810,8 +619,9 @@ void drawLogo() {
     
     // 在右墙上绘制logo，位置在墙的中央
     float logoSize = 6.0f; // logo的大小
-    float logoX = ROOM_HALF - 0.1f; // 更突出墙面，避免被遮挡
+    float logoX = ROOM_HALF - 0.65f; // 更突出墙面，避免被遮挡
     float logoY = ROOM_HEIGHT * 0.5f; // 垂直居中
+    glNormal3f(-1,0,0);
     float logoZ = 0.0f; // 水平居中
     
     glColor3f(1.0f, 1.0f, 1.0f);
@@ -838,9 +648,10 @@ void drawDaqing() {
     
     // 在前墙上绘制daqing，位置在墙的中央
     float daqingSize = 6.0f; // daqing的大小
-    float daqingX = 0.0f; // 水平居中
+    float daqingX = 3.5f; // 水平居中
     float daqingY = ROOM_HEIGHT * 0.5f; // 垂直居中
-    float daqingZ = -ROOM_HALF - 0.1f; // 更突出墙面，避免被遮挡
+    glNormal3f(0,0,1);
+    float daqingZ = -ROOM_HALF + 0.65f; // 更突出墙面，避免被遮挡
     
     glColor3f(1.0f, 1.0f, 1.0f);
     glBegin(GL_QUADS);
@@ -866,7 +677,8 @@ void drawHome() {
     
     // 在左墙上绘制home，位置在墙的中央，尺寸较小
     float homeSize = 4.0f; // home的大小（比logo小一些）
-    float homeX = -ROOM_HALF - 0.1f; // 更突出墙面，避免被遮挡
+    glNormal3f(1,0,0);
+    float homeX = -ROOM_HALF + 0.65f; // 更突出墙面，避免被遮挡
     float homeY = ROOM_HEIGHT * 0.5f; // 垂直居中
     float homeZ = 0.0f; // 水平居中
     
@@ -882,108 +694,6 @@ void drawHome() {
 }
 
 // 绘制窗户
-void drawWindow() {
-    // 禁用纹理，使用纯色绘制窗户
-    glDisable(GL_TEXTURE_2D);
-    
-    float innerZ = -ROOM_HALF;
-    float outerZ = -ROOM_HALF - wallThickness;
-    
-    // 绘制窗户框架（深棕色）
-    glColor3f(0.4f, 0.2f, 0.1f);
-    float frameThickness = 0.3f;
-    
-    // 内层窗户框架 - 上边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY + windowHeight/2, innerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY + windowHeight/2, innerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY + windowHeight/2 + frameThickness, innerZ);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY + windowHeight/2 + frameThickness, innerZ);
-    glEnd();
-    
-    // 内层窗户框架 - 下边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY - windowHeight/2 - frameThickness, innerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY - windowHeight/2 - frameThickness, innerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY - windowHeight/2, innerZ);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY - windowHeight/2, innerZ);
-    glEnd();
-    
-    // 内层窗户框架 - 左边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY - windowHeight/2, innerZ);
-    glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, innerZ);
-    glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, innerZ);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY + windowHeight/2, innerZ);
-    glEnd();
-    
-    // 内层窗户框架 - 右边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, innerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY - windowHeight/2, innerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY + windowHeight/2, innerZ);
-    glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, innerZ);
-    glEnd();
-    
-    // 外层窗户框架 - 上边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY + windowHeight/2, outerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY + windowHeight/2, outerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY + windowHeight/2 + frameThickness, outerZ);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY + windowHeight/2 + frameThickness, outerZ);
-    glEnd();
-    
-    // 外层窗户框架 - 下边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY - windowHeight/2 - frameThickness, outerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY - windowHeight/2 - frameThickness, outerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY - windowHeight/2, outerZ);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY - windowHeight/2, outerZ);
-    glEnd();
-    
-    // 外层窗户框架 - 左边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY - windowHeight/2, outerZ);
-    glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, outerZ);
-    glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, outerZ);
-    glVertex3f(windowX - windowWidth/2 - frameThickness, windowY + windowHeight/2, outerZ);
-    glEnd();
-    
-    // 外层窗户框架 - 右边框
-    glBegin(GL_QUADS);
-    glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, outerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY - windowHeight/2, outerZ);
-    glVertex3f(windowX + windowWidth/2 + frameThickness, windowY + windowHeight/2, outerZ);
-    glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, outerZ);
-    glEnd();
-    
-    // 绘制窗户玻璃（内层，半透明，带阳光效果）
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(1.0f, 0.9f, 0.7f, 0.1f); // 更明亮的阳光色，更透明
-    
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, innerZ);
-    glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, innerZ);
-    glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, innerZ);
-    glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, innerZ);
-    glEnd();
-    
-    // 绘制窗户玻璃（外层，稍微偏蓝）
-    glColor4f(0.8f, 0.9f, 1.0f, 0.05f);
-    
-    glBegin(GL_QUADS);
-    glVertex3f(windowX - windowWidth/2, windowY - windowHeight/2, outerZ);
-    glVertex3f(windowX + windowWidth/2, windowY - windowHeight/2, outerZ);
-    glVertex3f(windowX + windowWidth/2, windowY + windowHeight/2, outerZ);
-    glVertex3f(windowX - windowWidth/2, windowY + windowHeight/2, outerZ);
-    glEnd();
-    
-    glDisable(GL_BLEND);
-    glEnable(GL_TEXTURE_2D);
-}
-
-// 初始化粒子系统
 void initParticles() {
     particleCount = 0;
     for (int i = 0; i < MAX_PARTICLES; i++) {
@@ -1115,138 +825,6 @@ void drawParticles() {
 }
 
 // 绘制局部坐标系下的长方体（底面中心在原点，光照法线正确）
-void drawBoxLocal(float w, float h, float d, float r, float g, float b) {
-    glColor3f(r, g, b);
-    float hw = w * 0.5f, hd = d * 0.5f;
-    glBegin(GL_QUADS);
-    // 顶面 (+Y)
-    glNormal3f(0, 1, 0);
-    glVertex3f(-hw, h, -hd); glVertex3f(-hw, h,  hd);
-    glVertex3f( hw, h,  hd); glVertex3f( hw, h, -hd);
-    // 底面 (-Y)
-    glNormal3f(0, -1, 0);
-    glVertex3f(-hw, 0, -hd); glVertex3f( hw, 0, -hd);
-    glVertex3f( hw, 0,  hd); glVertex3f(-hw, 0,  hd);
-    // 前面 (+Z)
-    glNormal3f(0, 0, 1);
-    glVertex3f(-hw, 0,  hd); glVertex3f( hw, 0,  hd);
-    glVertex3f( hw, h,  hd); glVertex3f(-hw, h,  hd);
-    // 后面 (-Z)
-    glNormal3f(0, 0, -1);
-    glVertex3f( hw, 0, -hd); glVertex3f(-hw, 0, -hd);
-    glVertex3f(-hw, h, -hd); glVertex3f( hw, h, -hd);
-    // 左面 (-X)
-    glNormal3f(-1, 0, 0);
-    glVertex3f(-hw, 0,  hd); glVertex3f(-hw, 0, -hd);
-    glVertex3f(-hw, h, -hd); glVertex3f(-hw, h,  hd);
-    // 右面 (+X)
-    glNormal3f(1, 0, 0);
-    glVertex3f( hw, 0, -hd); glVertex3f( hw, 0,  hd);
-    glVertex3f( hw, h,  hd); glVertex3f( hw, h, -hd);
-    glEnd();
-}
-
-// 绘制桌子（局部原点在底面中心）
-void drawTable() {
-    const float woodR = 0.55f, woodG = 0.27f, woodB = 0.07f;
-    const float legR  = 0.38f, legG  = 0.19f, legB  = 0.05f;
-    const float W = 6.0f, D = 4.0f, legH = 3.2f, topT = 0.22f, legS = 0.3f;
-    const float offX = W * 0.5f - 0.4f, offZ = D * 0.5f - 0.4f;
-
-    // 桌面
-    glPushMatrix(); glTranslatef(0, legH, 0);
-    drawBoxLocal(W, topT, D, woodR, woodG, woodB);
-    glPopMatrix();
-
-    // 四条腿
-    const float sx[4] = {-offX,  offX, -offX,  offX};
-    const float sz[4] = {-offZ, -offZ,  offZ,  offZ};
-    for (int i = 0; i < 4; i++) {
-        glPushMatrix(); glTranslatef(sx[i], 0, sz[i]);
-        drawBoxLocal(legS, legH, legS, legR, legG, legB);
-        glPopMatrix();
-    }
-}
-
-// 绘制椅子（局部原点在底面中心，椅背朝 -Z 方向，人坐时面朝 +Z）
-void drawChair() {
-    const float woodR = 0.45f, woodG = 0.22f, woodB = 0.05f;
-    const float legR  = 0.32f, legG  = 0.16f, legB  = 0.04f;
-    const float SW = 1.8f, SD = 1.8f, seatH = 2.2f, seatT = 0.15f;
-    const float legS = 0.2f, backH = 2.0f;
-    const float offX = SW * 0.5f - 0.25f, offZ = SD * 0.5f - 0.25f;
-
-    // 座面
-    glPushMatrix(); glTranslatef(0, seatH - seatT, 0);
-    drawBoxLocal(SW, seatT, SD, woodR, woodG, woodB);
-    glPopMatrix();
-
-    // 四条腿
-    const float lsx[4] = {-offX,  offX, -offX,  offX};
-    const float lsz[4] = {-offZ, -offZ,  offZ,  offZ};
-    for (int i = 0; i < 4; i++) {
-        glPushMatrix(); glTranslatef(lsx[i], 0, lsz[i]);
-        drawBoxLocal(legS, seatH - seatT, legS, legR, legG, legB);
-        glPopMatrix();
-    }
-
-    // 椅背竖杆（-Z 侧）
-    glPushMatrix(); glTranslatef(-offX, seatH, -offZ);
-    drawBoxLocal(legS, backH, legS, legR, legG, legB);
-    glPopMatrix();
-    glPushMatrix(); glTranslatef( offX, seatH, -offZ);
-    drawBoxLocal(legS, backH, legS, legR, legG, legB);
-    glPopMatrix();
-
-    // 椅背横档（上下各一）
-    glPushMatrix(); glTranslatef(0, seatH + backH * 0.7f, -offZ);
-    drawBoxLocal(SW - legS, 0.12f, legS, woodR, woodG, woodB);
-    glPopMatrix();
-    glPushMatrix(); glTranslatef(0, seatH + backH * 0.3f, -offZ);
-    drawBoxLocal(SW - legS, 0.12f, legS, woodR, woodG, woodB);
-    glPopMatrix();
-}
-
-// 绘制房间家具（桌子 + 四把椅子）
-void drawFurniture() {
-    glDisable(GL_TEXTURE_2D);
-
-    // 桌子放在房间后方区域
-    glPushMatrix();
-    glTranslatef(0, 0, 15);
-    drawTable();
-    glPopMatrix();
-
-    // 前侧椅子（面朝桌子，旋转180°）
-    glPushMatrix();
-    glTranslatef(0, 0, 20.0f);
-    glRotatef(180, 0, 1, 0);
-    drawChair();
-    glPopMatrix();
-
-    // 后侧椅子（面朝桌子，不旋转）
-    glPushMatrix();
-    glTranslatef(0, 0, 10.0f);
-    drawChair();
-    glPopMatrix();
-
-    // 左侧椅子（面朝桌子，旋转-90°）
-    glPushMatrix();
-    glTranslatef(-5.5f, 0, 15);
-    glRotatef(-90, 0, 1, 0);
-    drawChair();
-    glPopMatrix();
-
-    // 右侧椅子（面朝桌子，旋转90°）
-    glPushMatrix();
-    glTranslatef(5.5f, 0, 15);
-    glRotatef(90, 0, 1, 0);
-    drawChair();
-    glPopMatrix();
-
-    glEnable(GL_TEXTURE_2D);
-}
-
 // 绘制HUD准星（2D屏幕覆盖层）
 void drawHUD() {
     glMatrixMode(GL_PROJECTION);
@@ -1320,6 +898,15 @@ void drawHUD() {
         drawText(buf, 24, 768 - 72, 2.5f, 0.7f, 0.85f, 1.0f, 1.0f);
     }
 
+    {
+        char buf[128];
+        snprintf(buf,sizeof(buf),"%.0f FPS  %.1f MS",measuredFps,measuredMs);
+        drawText(buf,700,736,2,0.95f,0.88f,0.64f,1);
+        snprintf(buf,sizeof(buf),"VSYNC %s  SHADOW %s",vsyncEnabled?"ON":"OFF",shadowsEnabled?"ON":"OFF");
+        drawText(buf,650,710,1.7f,0.8f,0.88f,0.9f,1);
+        drawText("F5 VIEW  F6 VSYNC  F7 SHADOW  L LIGHT",24,20,1.5f,0.8f,0.86f,0.88f,1);
+    }
+
     // 上膛提示（中下）
     if (reloading) {
         std::string s = "RELOADING";
@@ -1385,27 +972,10 @@ void wbox(float cx, float cz, float w, float h, float d, float yBase) {
 // 计算射线打到房间内壁的距离与内法线
 float roomExit(float ox,float oy,float oz, float dx,float dy,float dz,
                float& nx,float& ny,float& nz) {
-    struct Face { int axis; float plane, nx,ny,nz; };
-    Face faces[6] = {
-        {0,-ROOM_HALF, 1,0,0}, {0, ROOM_HALF,-1,0,0},
-        {1, 0.0f, 0,1,0},      {1, ROOM_HEIGHT,0,-1,0},
-        {2,-ROOM_HALF, 0,0,1}, {2, ROOM_HALF,0,0,-1},
-    };
-    float o[3]={ox,oy,oz}, d[3]={dx,dy,dz};
-    float best=1e9f; nx=ny=nz=0;
-    for (int i=0;i<6;i++) {
-        float dd=d[faces[i].axis];
-        if (fabs(dd)<1e-6f) continue;
-        float t=(faces[i].plane-o[faces[i].axis])/dd;
-        if (t<=0.001f || t>=best) continue;
-        float px=ox+dx*t, py=oy+dy*t, pz=oz+dz*t;
-        const float m=0.01f;
-        if (px<-ROOM_HALF-m||px>ROOM_HALF+m) continue;
-        if (py<-m||py>ROOM_HEIGHT+m) continue;
-        if (pz<-ROOM_HALF-m||pz>ROOM_HALF+m) continue;
-        best=t; nx=faces[i].nx; ny=faces[i].ny; nz=faces[i].nz;
-    }
-    return best;
+    HouseScene::Vec normal;
+    float distance = house.trace({ox,oy,oz}, {dx,dy,dz}, normal);
+    nx = normal.x; ny = normal.y; nz = normal.z;
+    return distance;
 }
 
 void reloadWeapon() {
@@ -1606,7 +1176,7 @@ void drawWeapon() {
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
-    gluPerspective(50.0, 1024.0/768.0, 0.02, 10.0);
+    gluPerspective(55.0, double(framebufferWidth)/std::max(1,framebufferHeight), 0.02, 10.0);
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
@@ -1618,9 +1188,9 @@ void drawWeapon() {
     // 摇摆 + 后坐偏移
     float bx = sinf(weaponBob) * 0.012f * bobAmount;
     float by = fabsf(cosf(weaponBob)) * 0.012f * bobAmount;
-    float baseX = 0.16f + bx;
-    float baseY = -0.20f - by;
-    float baseZ = -0.55f + recoilKick * 0.12f; // 后坐向后
+    float baseX = 0.28f + bx;
+    float baseY = -0.26f - by;
+    float baseZ = -0.9f + recoilKick * 0.12f; // 后坐向后
 
     glTranslatef(baseX, baseY, baseZ);
     glRotatef(-recoilKick * 6.0f, 1, 0, 0); // 枪口上抬
@@ -1709,7 +1279,7 @@ void updateInteraction() {
 void drawSwitch() {
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_LIGHTING);
-    float x = ROOM_HALF - 0.06f;
+    float x = switchX;
     // 面板底座
     glColor3f(0.85f, 0.85f, 0.82f);
     glBegin(GL_QUADS);
@@ -1736,12 +1306,6 @@ void drawSwitch() {
 void toggleLights() {
     lightsOn = !lightsOn;
     audio::play(audio::SND_EMPTY, 0.4f); // 复用咔哒声作开关声
-}
-
-// 根据 lightsOn 启用/禁用房间主光（保留阳光 LIGHT3）
-void applyLights() {
-    if (lightsOn) { glEnable(GL_LIGHT0); glEnable(GL_LIGHT1); glEnable(GL_LIGHT2); }
-    else          { glDisable(GL_LIGHT0); glDisable(GL_LIGHT1); glDisable(GL_LIGHT2); }
 }
 
 // ============================================================================
@@ -1772,6 +1336,8 @@ void initFont() {
     fontAdd('S', {{{4,6},{0,6},{0,3},{4,3},{4,0},{0,0}}});
     fontAdd('T', {{{0,6},{4,6}},{{2,6},{2,0}}});
     fontAdd('U', {{{0,6},{0,1},{1,0},{3,0},{4,1},{4,6}}});
+    fontAdd('V', {{{0,6},{2,0},{4,6}}});
+    fontAdd('W', {{{0,6},{0.8f,0},{2,3},{3.2f,0},{4,6}}});
     fontAdd('Y', {{{0,6},{2,3},{4,6}},{{2,3},{2,0}}});
     fontAdd('0', {{{0,1},{0,5},{1,6},{3,6},{4,5},{4,1},{3,0},{1,0},{0,1}}});
     fontAdd('1', {{{1,5},{2,6},{2,0}},{{1,0},{3,0}}});
@@ -1815,86 +1381,32 @@ void drawText(const std::string& s, float x, float y, float scale,
 
 // 设置光照
 void setupLighting() {
-    // 启用光照
-    glEnable(GL_LIGHTING);
-    glEnable(GL_LIGHT0);
-    glEnable(GL_LIGHT1); // 添加第二个光源
-    glEnable(GL_LIGHT2); // 添加第三个光源
-    glEnable(GL_LIGHT3); // 添加太阳光源
-    
-    // 设置主光源位置
-    glLightfv(GL_LIGHT0, GL_POSITION, lightPosition);
-    
-    // 设置环境光
-    glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmbient);
-    
-    // 设置漫反射光
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiffuse);
-    
-    // 设置镜面反射光
-    glLightfv(GL_LIGHT0, GL_SPECULAR, lightSpecular);
-    
-    // 设置光源衰减
-    glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 1.0f);
-    glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 0.05f);
-    glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 0.005f);
-    
-    // 添加第二个光源（补充光源）
-    float light1Position[4] = {0.0f, 8.0f, 0.0f, 1.0f};
-    float light1Ambient[4] = {0.4f, 0.4f, 0.4f, 1.0f};
-    float light1Diffuse[4] = {4.0f, 4.0f, 4.0f, 1.0f};
-    float light1Specular[4] = {4.0f, 4.0f, 4.0f, 1.0f};
-    
-    glLightfv(GL_LIGHT1, GL_POSITION, light1Position);
-    glLightfv(GL_LIGHT1, GL_AMBIENT, light1Ambient);
-    glLightfv(GL_LIGHT1, GL_DIFFUSE, light1Diffuse);
-    glLightfv(GL_LIGHT1, GL_SPECULAR, light1Specular);
-    
-    glLightf(GL_LIGHT1, GL_CONSTANT_ATTENUATION, 1.0f);
-    glLightf(GL_LIGHT1, GL_LINEAR_ATTENUATION, 0.1f);
-    glLightf(GL_LIGHT1, GL_QUADRATIC_ATTENUATION, 0.01f);
-    
-    // 添加第三个光源（角落光源）
-    float light2Position[4] = {15.0f, 10.0f, 15.0f, 1.0f};
-    float light2Ambient[4] = {0.3f, 0.3f, 0.3f, 1.0f};
-    float light2Diffuse[4] = {3.0f, 3.0f, 3.0f, 1.0f};
-    float light2Specular[4] = {3.0f, 3.0f, 3.0f, 1.0f};
-    
-    glLightfv(GL_LIGHT2, GL_POSITION, light2Position);
-    glLightfv(GL_LIGHT2, GL_AMBIENT, light2Ambient);
-    glLightfv(GL_LIGHT2, GL_DIFFUSE, light2Diffuse);
-    glLightfv(GL_LIGHT2, GL_SPECULAR, light2Specular);
-    
-    glLightf(GL_LIGHT2, GL_CONSTANT_ATTENUATION, 1.0f);
-    glLightf(GL_LIGHT2, GL_LINEAR_ATTENUATION, 0.15f);
-    glLightf(GL_LIGHT2, GL_QUADRATIC_ATTENUATION, 0.02f);
-    
-    // 添加太阳光源（从窗户照射进来）
-    float sunPosition[4] = {windowX, windowY, windowZ + 15.0f, 1.0f}; // 在窗户外面15单位处，更近一些
-    float sunAmbient[4] = {0.3f, 0.3f, 0.2f, 1.0f}; // 增强太阳环境光
-    float sunDiffuse[4] = {5.0f, 4.5f, 3.5f, 1.0f}; // 大幅增强阳光强度
-    float sunSpecular[4] = {4.0f, 3.5f, 2.8f, 1.0f}; // 增强阳光镜面反射
-    
-    glLightfv(GL_LIGHT3, GL_POSITION, sunPosition);
-    glLightfv(GL_LIGHT3, GL_AMBIENT, sunAmbient);
-    glLightfv(GL_LIGHT3, GL_DIFFUSE, sunDiffuse);
-    glLightfv(GL_LIGHT3, GL_SPECULAR, sunSpecular);
-    
-    // 太阳光衰减设置（减少衰减，让光源更强）
-    glLightf(GL_LIGHT3, GL_CONSTANT_ATTENUATION, 1.0f);
-    glLightf(GL_LIGHT3, GL_LINEAR_ATTENUATION, 0.01f);
-    glLightf(GL_LIGHT3, GL_QUADRATIC_ATTENUATION, 0.0005f);
-    
-    // 启用颜色材质
+    // Legacy weapon, target and painting rendering uses the same world-space light.
+    glEnable(GL_LIGHTING); glEnable(GL_NORMALIZE);
     glEnable(GL_COLOR_MATERIAL);
     glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+    float ambient[] = {0.22f,0.24f,0.27f,1};
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, ambient);
+    float position[] = {0,11,0,1}, diffuse[] = {0.9f,0.75f,0.53f,1};
+    float zero[] = {0,0,0,1};
+    glLightfv(GL_LIGHT0,GL_POSITION,position);
+    glLightfv(GL_LIGHT0,GL_DIFFUSE,diffuse);
+    glLightfv(GL_LIGHT0,GL_AMBIENT,zero);
+    glLightf(GL_LIGHT0,GL_LINEAR_ATTENUATION,0.025f);
+    glLightf(GL_LIGHT0,GL_QUADRATIC_ATTENUATION,0.001f);
+    float sun[] = {-0.55f,1,-0.8f,0}, sunlight[] = {0.5f,0.44f,0.34f,1};
+    glLightfv(GL_LIGHT3,GL_POSITION,sun);
+    glLightfv(GL_LIGHT3,GL_DIFFUSE,sunlight);
+    glLightfv(GL_LIGHT3,GL_AMBIENT,zero);
+    glEnable(GL_LIGHT3); glDisable(GL_LIGHT1); glDisable(GL_LIGHT2);
+    if(lightsOn) glEnable(GL_LIGHT0); else glDisable(GL_LIGHT0);
 }
 
 // 设置相机
 void setupCamera() {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    gluPerspective(45.0, 1024.0/768.0, 0.1, 100.0);
+    gluPerspective(65.0, double(framebufferWidth)/std::max(1, framebufferHeight), 0.1, 300.0);
     
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
@@ -1911,15 +1423,54 @@ void setupCamera() {
               0, 1, 0);
 }
 
-int main() {
+// Captures the actual framebuffer for repeatable visual smoke checks.
+bool saveFrame(const std::string& path, int width, int height) {
+    std::vector<unsigned char> pixels(size_t(width)*height*3), flipped(pixels.size());
+    glPixelStorei(GL_PACK_ALIGNMENT,1);
+    glReadPixels(0,0,width,height,GL_RGB,GL_UNSIGNED_BYTE,pixels.data());
+    for(int y=0;y<height;y++)
+        std::memcpy(flipped.data()+size_t(y)*width*3,pixels.data()+size_t(height-1-y)*width*3,size_t(width)*3);
+    png_image image{}; image.version=PNG_IMAGE_VERSION; image.width=width; image.height=height; image.format=PNG_FORMAT_RGB;
+    bool ok=png_image_write_to_file(&image,path.c_str(),0,flipped.data(),0,nullptr);
+    if(!ok) std::cerr << "Screenshot: " << image.message << '\n';
+    png_image_free(&image); return ok;
+}
+
+int main(int argc, char** argv) {
+    int frameLimit=0;
+    bool mute=false, captureOK=true, renderOK=true;
+    std::string capturePath, view="entrance";
+    for(int i=1;i<argc;i++) {
+        std::string arg=argv[i];
+        if(arg=="--no-audio") mute=true;
+        else if(arg=="--no-vsync") vsyncEnabled=false;
+        else if(arg=="--no-shadows") shadowsEnabled=false;
+        else if(arg=="--lights-off") lightsOn=false;
+        else if((arg=="--frames" || arg=="--capture" || arg=="--view") && i+1<argc) {
+            std::string value=argv[++i];
+            if(arg=="--frames") { try { frameLimit=std::stoi(value); } catch(...) { frameLimit=-1; }
+                if(frameLimit<=0) { std::cerr<<"--frames requires a positive integer\n"; return 1; } }
+            else if(arg=="--capture") capturePath=value;
+            else view=value;
+        } else { std::cerr<<"Usage: CSGODemo [--no-audio] [--no-vsync] [--no-shadows] [--lights-off] [--frames N] [--capture image.png] [--view entrance|exterior|interior|bedroom]\n"; return 1; }
+    }
+    if(!capturePath.empty() && !frameLimit) frameLimit=3;
+    if(view=="exterior") { camera.x=65; camera.y=32; camera.z=74; camera.yaw=-132; camera.pitch=-18; }
+    else if(view=="interior") { camera.x=5; camera.y=6; camera.z=-5; camera.yaw=-149; camera.pitch=-8; }
+    else if(view=="bedroom") { camera.x=12; camera.y=6; camera.z=9; camera.yaw=55; camera.pitch=-10; }
+    else if(view!="entrance") { std::cerr<<"Unknown view: "<<view<<'\n'; return 1; }
+    house.build();
+
     // 初始化GLFW
     if (!glfwInit()) {
         std::cerr << "Failed to initialize GLFW" << std::endl;
         return -1;
     }
     
-    // 创建窗口
-    GLFWwindow* window = glfwCreateWindow(1024, 768, "CSGO Demo", nullptr, nullptr);
+    // Compatibility context preserves the existing immediate-mode gameplay renderer.
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,0);
+    GLFWwindow* window = glfwCreateWindow(1280, 800, "CS House | OpenGL", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
@@ -1928,77 +1479,60 @@ int main() {
     
     // 获取主显示器信息并居中显示窗口
     GLFWmonitor* primary = glfwGetPrimaryMonitor();
-    const GLFWvidmode* mode = glfwGetVideoMode(primary);
+    const GLFWvidmode* mode = primary ? glfwGetVideoMode(primary) : nullptr;
     
-    int windowWidth = 1024;
-    int windowHeight = 768;
-    int xPos = (mode->width - windowWidth) / 2;
-    int yPos = (mode->height - windowHeight) / 2;
+    int windowWidth = 1280;
+    int windowHeight = 800;
+    int xPos = mode ? (mode->width - windowWidth) / 2 : 0;
+    int yPos = mode ? (mode->height - windowHeight) / 2 : 0;
     
     glfwSetWindowPos(window, xPos, yPos);
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(vsyncEnabled ? 1 : 0);
+    std::cout << "GPU: " << glGetString(GL_RENDERER) << " | OpenGL " << glGetString(GL_VERSION) << '\n';
     glfwSetKeyCallback(window, keyCallback);
     glfwSetCursorPosCallback(window, mouseCallback);
     glfwSetScrollCallback(window, scrollCallback);
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    
+    glfwSetInputMode(window, GLFW_CURSOR, frameLimit ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+    if(frameLimit) mouseCaptured=false;
+
     // 设置OpenGL
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_TEXTURE_2D);
-    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    glClearColor(0.64f, 0.75f, 0.81f, 1.0f);
     
-    // 设置光照
+    if(!house.initializeGL()) { glfwDestroyWindow(window); glfwTerminate(); return 1; }
+    std::cout << "House: " << house.triangleCount() << " triangles, " << house.drawCalls() << " material batches; sunlight shadow map 4096x4096\n";
     setupLighting();
     
     // 初始化粒子系统
-    srand(time(nullptr)); // 初始化随机数种子
+    srand(frameLimit ? 42 : time(nullptr)); // 初始化随机数种子
     initParticles();
 
     // 初始化音频（失败则静音运行）
-    audio::init();
+    if(!mute) audio::init();
 
     // 初始化字体与靶子
     initFont();
     initTargets();
     
     // 加载纹理
-    wallTexture = loadTexture("res/wall.png");
-    if (wallTexture == 0) {
-        std::cerr << "Failed to load wall texture" << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-    
-    floorTexture = loadTexture("res/floor.png");
-    if (floorTexture == 0) {
-        std::cerr << "Failed to load floor texture" << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-    
-    skyTexture = loadTexture("res/sky.png");
-    if (skyTexture == 0) {
-        std::cerr << "Failed to load sky texture" << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-    
-    logoTexture = loadTexture("res/logo.png");
+    logoTexture = loadTexture(CSGO_RESOURCE_DIR "/logo.png");
     if (logoTexture == 0) {
         std::cerr << "Failed to load logo texture" << std::endl;
-        glfwTerminate();
+        audio::shutdown(); house.shutdownGL(); glfwDestroyWindow(window); glfwTerminate();
         return -1;
     }
     
-    daqingTexture = loadTexture("res/daqing.png");
+    daqingTexture = loadTexture(CSGO_RESOURCE_DIR "/daqing.png");
     if (daqingTexture == 0) {
         std::cerr << "Warning: Failed to load daqing texture, continuing without it" << std::endl;
     } else {
         std::cout << "Daqing texture loaded successfully" << std::endl;
     }
     
-    homeTexture = loadTexture("res/home.png");
+    homeTexture = loadTexture(CSGO_RESOURCE_DIR "/home.png");
     if (homeTexture == 0) {
         std::cerr << "Warning: Failed to load home texture, continuing without it" << std::endl;
     } else {
@@ -2016,6 +1550,8 @@ int main() {
     std::cout << "  ESC      - 切换鼠标捕获状态" << std::endl;
     std::cout << "  Q        - 退出应用" << std::endl;
     
+    std::cout << "  F5 室内/室外视角 | F6 垂直同步 | F7 太阳阴影 | L 室内灯\n";
+    int frames=0, sampleFrames=0; double sampleTime=0;
     // 主循环
     auto lastTime = std::chrono::high_resolution_clock::now();
     
@@ -2024,11 +1560,18 @@ int main() {
         auto currentTime = std::chrono::high_resolution_clock::now();
         float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
         lastTime = currentTime;
+        sampleTime += deltaTime; ++sampleFrames;
+        if(sampleTime >= 0.5) {
+            measuredFps = float(sampleFrames/sampleTime); measuredMs = float(sampleTime*1000/sampleFrames);
+            char title[256]; snprintf(title,sizeof(title),"CS House | %.1f FPS | %.2f ms | VSync %s | Shadows %s",measuredFps,measuredMs,vsyncEnabled?"ON":"OFF",shadowsEnabled?"ON":"OFF");
+            glfwSetWindowTitle(window,title); sampleTime=0; sampleFrames=0;
+        }
+        deltaTime = std::min(deltaTime, 0.05f);
         
         // 处理输入（只有在鼠标被捕获时才允许移动）
         playerMoving = false;
         if (mouseCaptured) {
-            float moveSpeed = 5.0f * deltaTime;
+            float moveSpeed = (keys[GLFW_KEY_LEFT_CONTROL] ? 22.0f : 10.0f) * deltaTime;
             float radYaw = camera.yaw * M_PI / 180.0f;
             float ox = camera.x, oz = camera.z;
 
@@ -2062,39 +1605,37 @@ int main() {
         updateSparks(deltaTime);
         updateInteraction();
 
-        // 渲染
+        // Opaque geometry first; glass is sorted and blended after the world.
+        glfwGetFramebufferSize(window,&framebufferWidth,&framebufferHeight);
+        if(framebufferWidth <= 0 || framebufferHeight <= 0) { glfwWaitEventsTimeout(0.05); continue; }
+        glViewport(0,0,framebufferWidth,framebufferHeight);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        applyLights(); // 根据开关状态启用/禁用主光
-
         setupCamera();
-        drawRoom();
-        drawFurniture(); // 绘制家具
-        drawWindow(); // 绘制窗户
-        drawLogo(); // 绘制logo装饰画
-        drawDaqing(); // 绘制daqing装饰画
-        drawHome(); // 绘制home装饰画
-        drawSwitch(); // 绘制灯开关
-        drawTargets(); // 绘制靶子/敌人
-        drawParticles(); // 绘制火焰粒子
-        drawSparks(); // 绘制弹孔火花
-        drawWeapon(); // 绘制第一人称武器
-        drawHUD(); // 绘制准星与HUD
+        setupLighting();
+        house.draw(camera.x,camera.y,camera.z,lightsOn,shadowsEnabled);
+        drawLogo();
+        drawDaqing();
+        drawHome();
+        drawSwitch();
+        drawTargets();
+        drawParticles();
+        drawSparks();
+        house.drawGlass(camera.x,camera.y,camera.z);
+        drawWeapon();
+        drawHUD();
+        ++frames;
+        if(frameLimit && frames >= frameLimit) {
+            if(!capturePath.empty()) captureOK=saveFrame(capturePath,framebufferWidth,framebufferHeight);
+            GLenum error=glGetError();
+            if(error!=GL_NO_ERROR) { std::cerr<<"OpenGL error: "<<error<<'\n'; renderOK=false; }
+            glfwSetWindowShouldClose(window,GL_TRUE);
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
     
     // 清理纹理
-    if (wallTexture != 0) {
-        glDeleteTextures(1, &wallTexture);
-    }
-    if (floorTexture != 0) {
-        glDeleteTextures(1, &floorTexture);
-    }
-    if (skyTexture != 0) {
-        glDeleteTextures(1, &skyTexture);
-    }
     if (logoTexture != 0) {
         glDeleteTextures(1, &logoTexture);
     }
@@ -2106,6 +1647,8 @@ int main() {
     }
     
     audio::shutdown();
+    house.shutdownGL();
+    glfwDestroyWindow(window);
     glfwTerminate();
-    return 0;
+    return captureOK && renderOK ? 0 : 1;
 }
